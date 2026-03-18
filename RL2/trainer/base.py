@@ -21,10 +21,6 @@ class Trainer:
         if self.load_dir is not None:
             if hasattr(config, "actor"):
                 config.actor.model_name = f"{self.load_dir}/actor/model"
-            if hasattr(config, "critic"):
-                config.critic.model_name = f"{self.load_dir}/critic/model"
-            if hasattr(config, "rollout"):
-                config.rollout.server_args.model_path = f"{self.load_dir}/actor/model"
         
         self.config = config
 
@@ -51,8 +47,7 @@ class Trainer:
         if self.load_dir is None:
             return 0
         for worker in workers:
-            worker_name = "actor" if "Actor" in worker.__class__.__name__ else "critic"
-            worker.load_ckpt(f"{self.load_dir}/{worker_name}/optimizer_scheduler")
+            worker.load_ckpt(f"{self.load_dir}/actor/optimizer_scheduler")
 
         ckpt = self._get_ckpt(0)
         dcp.load(ckpt, checkpoint_id=f"{self.load_dir}/trainer")
@@ -67,8 +62,7 @@ class Trainer:
 
         save_dir = f"{self.config.trainer.save_dir}/step{step}"
         for worker in workers:
-            worker_name = "actor" if "Actor" in worker.__class__.__name__ else "critic"
-            worker.save_ckpt(f"{save_dir}/{worker_name}")
+            worker.save_ckpt(f"{save_dir}/actor")
 
         dcp.save(
             self._get_ckpt(step),
@@ -82,5 +76,4 @@ class Trainer:
             save_dir += "/latest"
         
         for worker in workers:
-            worker_name = "actor" if "Actor" in worker.__class__.__name__ else "critic"
-            worker.save_model(f"{save_dir}/{worker_name}")
+            worker.save_model(f"{save_dir}/actor")

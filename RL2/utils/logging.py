@@ -84,25 +84,3 @@ def gather_and_log(
         f"{k}: {v:.3g}" for k, v in metrics.items()
     ]))
     wandb.log(metrics, step=step)
-
-def gather_and_reduce(
-    lst: List[float], process_group: dist.ProcessGroup
-) -> Optional[float]:
-
-    lst = gather_and_concat_list(lst, process_group)
-    if dist.get_rank() == 0:
-        return sum(lst)
-
-def rank0_log(metrics: Dict[str, List[float]], step: int):
-    
-    if dist.get_rank() != 0:
-        return
-    
-    metrics = {
-        k: sum(v) / len(v)
-        for k, v in metrics.items()
-    }
-    tqdm.write(f"Step {step}, " + ", ".join([
-        f"{k}: {v:.3g}" for k, v in metrics.items()
-    ]))
-    wandb.log(metrics, step=step)

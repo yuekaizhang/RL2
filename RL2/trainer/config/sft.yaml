@@ -1,6 +1,6 @@
 defaults:
 - _self_
-- actor: fsdp
+- actor: megatron
 
 data:
   train:
