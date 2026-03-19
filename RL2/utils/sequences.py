@@ -46,12 +46,13 @@ def _tensor_dict_to_minibatches(
             # The number of sequences must be no less than `n_minibatches`.
             # If not, we pad the number of sequences to `n_minibatches`.
             PAD_SEQUENCES = n_minibatches - len(seq_len_list)
+            n_pad_rows = (2 if pair else 1) * PAD_SEQUENCES
             for k, v in tensor_dict.items():
-                tensor_dict[k] = F.pad(
-                    v,
-                    (0, 0, 0, (2 if pair else 1) * PAD_SEQUENCES),
-                    value=0
-                )
+                # Build padding tuple: F.pad pads from last dim inward
+                # For 2D [batch, seq]: (0, 0, 0, n_pad_rows)
+                # For 3D [batch, C, L]: (0, 0, 0, 0, 0, n_pad_rows)
+                pad_args = [0, 0] * (v.ndim - 1) + [0, n_pad_rows]
+                tensor_dict[k] = F.pad(v, pad_args, value=0)
             seq_len_list.extend(PAD_SEQUENCES * [0])
         else:
             PAD_SEQUENCES = 0
@@ -215,6 +216,8 @@ def count_total(
     )
     return total.to("cpu").item()
 
+_MULTIMODAL_PASSTHROUGH_KEYS = {"input_features", "feature_attention_mask"}
+
 def slide_along_cp(
     minibatch: Dict[str, torch.Tensor],
     process_group: dist.ProcessGroup,
@@ -236,6 +239,9 @@ def slide_along_cp(
     seq_lens = minibatch["eos_mask"].argmax(-1) + 1
     processed_minibatch = {}
     for k, v in minibatch.items():
+        if k in _MULTIMODAL_PASSTHROUGH_KEYS:
+            processed_minibatch[k] = v
+            continue
         tensors = [
             _slide_tensor_along_cp(tensor[:seq_len])
             for tensor, seq_len in zip(v, seq_lens)

@@ -1,0 +1,41 @@
+defaults:
+- _self_
+- actor: megatron
+
+data:
+  train:
+    dataset_name: yuekai/aishell
+    dataset_subset: train
+    dataset_split: test
+    batch_size: 32
+    max_length: 4096
+    audio_column: audio
+    text_column: text
+    prompt: "Detect the language and recognize the speech: <|zh|>"
+    remove_text_spaces: true
+  test:
+    dataset_name: ${data.train.dataset_name}
+    dataset_subset: dev
+    dataset_split: test
+    batch_size: ${data.train.batch_size}
+    max_length: ${data.train.max_length}
+    audio_column: ${data.train.audio_column}
+    text_column: ${data.train.text_column}
+    prompt: ${data.train.prompt}
+    remove_text_spaces: ${data.train.remove_text_spaces}
+  test_ratio: 0.03
+
+actor:
+  avg_level: token
+  freeze_audio_encoder: false
+  freeze_language_model: false
+  freeze_multi_modal_projector: false
+
+trainer:
+  project: null
+  experiment_name: null
+  load_ckpt_from: null
+  n_epochs: 3
+  save_dir: ckpts/${trainer.experiment_name}
+  save_freq: null
+  use_wandb: true

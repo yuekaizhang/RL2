@@ -53,6 +53,18 @@ class MegatronWorker(Worker):
         tf_config = OmegaConf.to_container(config.tf_config)
         for k, v in tf_config.items():
             setattr(self.provider, k, v)
+        # Pass optional freeze flags to the provider (for multimodal models)
+        for freeze_key in ("freeze_audio_encoder", "freeze_language_model",
+                           "freeze_multi_modal_projector"):
+            if hasattr(config, freeze_key):
+                # Map config keys to provider attribute names
+                provider_key = freeze_key
+                if freeze_key == "freeze_audio_encoder":
+                    provider_key = "freeze_audio_model"
+                elif freeze_key == "freeze_multi_modal_projector":
+                    provider_key = "freeze_audio_projection"
+                if hasattr(self.provider, provider_key):
+                    setattr(self.provider, provider_key, getattr(config, freeze_key))
         self.provider.sequence_parallel = self.provider.tensor_model_parallel_size > 1
         self.provider.finalize()
         if not mpu.is_initialized():
@@ -223,13 +235,19 @@ class MegatronWorker(Worker):
                 max_seqlen_kv=max_seqlen,
                 qkv_format="thd"
             )
-            output_tensor = model(
+            forward_kwargs = dict(
                 input_ids=minibatch["states"],
                 attention_mask=None,
                 position_ids=None,
                 labels=None,
-                packed_seq_params=packed_seq_params
+                packed_seq_params=packed_seq_params,
             )
+            # Pass audio-specific tensors if present (for multimodal models)
+            if "input_features" in minibatch:
+                forward_kwargs["input_features"] = minibatch["input_features"]
+            if "feature_attention_mask" in minibatch:
+                forward_kwargs["feature_attention_mask"] = minibatch["feature_attention_mask"]
+            output_tensor = model(**forward_kwargs)
 
             return output_tensor, partial(f, minibatch, cu_seqlens)
 
