@@ -130,4 +130,4 @@ wandb/
 core-*
 nohup.out
 test.py
-MANIFEST.in
+MANIFEST.in.humanize*
