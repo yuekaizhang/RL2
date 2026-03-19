@@ -13,6 +13,10 @@ IGNORE_INDEX = -100
 
 logger = logging.getLogger(__name__)
 
+# Default audio parameters for Qwen2-Audio (Whisper-based feature extractor)
+_DEFAULT_MAX_AUDIO_SECONDS = 30
+_DEFAULT_SAMPLING_RATE = 16000
+
 
 def build_conversation(
     prompt: str, answer: str, remove_text_spaces: bool = True
@@ -36,9 +40,10 @@ def build_conversation(
     ]
 
 
-def _validate_audio(audio_raw, idx: int) -> np.ndarray:
+def _validate_audio(audio_raw, idx: int) -> Tuple[np.ndarray, int]:
     """Validate and extract audio array from various HF audio formats.
 
+    Returns (audio_array, sampling_rate).
     Raises ValueError with a descriptive message for missing or corrupted audio.
     """
     if audio_raw is None:
@@ -47,6 +52,8 @@ def _validate_audio(audio_raw, idx: int) -> np.ndarray:
             "The audio file may be missing or failed to load."
         )
 
+    sampling_rate = _DEFAULT_SAMPLING_RATE
+
     if isinstance(audio_raw, dict):
         arr = audio_raw.get("array")
         if arr is None:
@@ -54,8 +61,12 @@ def _validate_audio(audio_raw, idx: int) -> np.ndarray:
                 f"Example {idx}: audio dict has no 'array' key. "
                 f"Available keys: {list(audio_raw.keys())}"
             )
+        if "sampling_rate" in audio_raw:
+            sampling_rate = audio_raw["sampling_rate"]
     elif isinstance(audio_raw, (tuple, list)):
         arr = audio_raw[0]
+        if len(audio_raw) > 1:
+            sampling_rate = audio_raw[1]
     else:
         arr = audio_raw
 
@@ -74,7 +85,26 @@ def _validate_audio(audio_raw, idx: int) -> np.ndarray:
             f"Example {idx}: extracted audio array is None."
         )
 
-    return arr
+    return arr, sampling_rate
+
+
+def _truncate_audio(
+    audio_arr, sampling_rate: int, max_audio_seconds: float
+) -> np.ndarray:
+    """Truncate audio array to max_audio_seconds if it exceeds the limit.
+
+    This ensures overlong audio is explicitly handled before processor
+    invocation, aligned with the feature extractor's capacity (e.g.,
+    Whisper's 30-second window).
+    """
+    max_samples = int(max_audio_seconds * sampling_rate)
+    if hasattr(audio_arr, '__len__') and len(audio_arr) > max_samples:
+        logger.info(
+            f"Audio truncated from {len(audio_arr)} to {max_samples} samples "
+            f"({max_audio_seconds}s at {sampling_rate}Hz)"
+        )
+        return audio_arr[:max_samples]
+    return audio_arr
 
 
 class AudioSFTDataset(Dataset):
@@ -106,41 +136,97 @@ class AudioSFTDataset(Dataset):
                     f"Available columns: {columns}"
                 )
 
+        # Precompute special token IDs for boundary-aware label masking.
+        # Qwen2 chat template uses <|im_start|> / <|im_end|> as turn markers.
+        self._im_start_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
+        self._im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        # Tokenize the assistant role header ("assistant\n") to compute the
+        # number of tokens to skip after <|im_start|> to reach content.
+        self._assistant_header_ids = self.tokenizer.encode(
+            "assistant\n", add_special_tokens=False
+        )
+
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.dataset[idx]
 
+    def _find_assistant_content_boundaries(
+        self, ids: List[int]
+    ) -> Tuple[int, int]:
+        """Find the token boundaries of the assistant's content.
+
+        Uses chat template structural markers (<|im_start|>, <|im_end|>)
+        instead of text-based substring search. This is deterministic and
+        does not depend on tokenization of the assistant text matching.
+
+        Returns (content_start, content_end) token indices, or (-1, -1) if
+        the boundaries cannot be determined.
+        """
+        # Find the last <|im_start|> — in our single-turn format, this is
+        # always the assistant turn (system, user, assistant).
+        last_im_start = -1
+        for j in range(len(ids) - 1, -1, -1):
+            if ids[j] == self._im_start_id:
+                last_im_start = j
+                break
+
+        if last_im_start < 0:
+            return -1, -1
+
+        # Verify the role header matches "assistant\n"
+        header_start = last_im_start + 1
+        header_end = header_start + len(self._assistant_header_ids)
+
+        if header_end > len(ids):
+            return -1, -1
+
+        actual_header = ids[header_start:header_end]
+        if actual_header != self._assistant_header_ids:
+            return -1, -1
+
+        content_start = header_end
+
+        # Find the next <|im_end|> after the content start
+        content_end = len(ids)
+        for j in range(content_start, len(ids)):
+            if ids[j] == self._im_end_id:
+                content_end = j
+                break
+
+        return content_start, content_end
+
     def collate_fn(
         self, examples: List[Dict[str, Any]]
     ) -> Dict[str, torch.Tensor]:
         conversations = []
         audios = []
-        assistant_texts = []
 
         prompt = getattr(self.config, "prompt", "Transcribe the audio clip.")
         audio_column = getattr(self.config, "audio_column", "audio")
         text_column = getattr(self.config, "text_column", "text")
         remove_text_spaces = getattr(self.config, "remove_text_spaces", True)
         max_length = getattr(self.config, "max_length", 4096)
+        max_audio_seconds = getattr(
+            self.config, "max_audio_seconds", _DEFAULT_MAX_AUDIO_SECONDS
+        )
 
-        valid_examples = []
         for idx, ex in enumerate(examples):
             answer = ex[text_column]
             conv = build_conversation(prompt, answer, remove_text_spaces)
-            clean_answer = answer.replace(" ", "") if remove_text_spaces else answer
 
             try:
-                audio_arr = _validate_audio(ex[audio_column], idx)
+                audio_arr, sr = _validate_audio(ex[audio_column], idx)
             except ValueError as e:
                 warnings.warn(str(e) + " Skipping this example.")
                 continue
 
+            # Explicit audio truncation aligned with feature extractor capacity
+            audio_arr = _truncate_audio(audio_arr, sr, max_audio_seconds)
+
             conversations.append(conv)
-            assistant_texts.append(clean_answer)
             audios.append(audio_arr)
-            valid_examples.append(ex)
 
         if not conversations:
             raise RuntimeError(
@@ -164,28 +250,22 @@ class AudioSFTDataset(Dataset):
         input_ids = batch["input_ids"]
         batch_size, seq_len = input_ids.shape
 
-        # Build labels: mask all non-assistant tokens with IGNORE_INDEX
+        # Build labels using boundary-aware masking via structural tokens.
+        # Start with all tokens masked, then unmask only assistant content.
         labels = torch.full_like(input_ids, IGNORE_INDEX)
-        for i, assistant_text in enumerate(assistant_texts):
+        for i in range(batch_size):
             ids = input_ids[i].tolist()
-            assistant_token_ids = self.tokenizer(
-                assistant_text, add_special_tokens=False
-            )["input_ids"]
-
-            span_len = len(assistant_token_ids)
-            found = -1
-            # Search backward to find the last occurrence of the assistant span
-            for start in range(len(ids) - span_len, -1, -1):
-                if ids[start: start + span_len] == assistant_token_ids:
-                    found = start
-                    break
-
-            if found >= 0:
-                # Only unmask the assistant content tokens
-                labels[i, found: found + span_len] = input_ids[i, found: found + span_len]
+            content_start, content_end = self._find_assistant_content_boundaries(
+                ids
+            )
+            if content_start >= 0 and content_start < content_end:
+                labels[i, content_start:content_end] = input_ids[
+                    i, content_start:content_end
+                ]
             else:
                 warnings.warn(
-                    f"Could not find assistant span for example {i}, masking all"
+                    f"Example {i}: could not determine assistant content "
+                    f"boundaries via chat template tokens. All tokens masked."
                 )
 
         # Shift labels for next-token prediction (Megatron convention)
@@ -218,7 +298,7 @@ class AudioSFTDataset(Dataset):
             "actions": actions,
             "action_mask": action_mask,
             "eos_mask": eos_mask,
-            # AC-1 required tensors for verification/debugging
+            # Full-sequence diagnostic tensors for verification
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": shifted_labels,

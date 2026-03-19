@@ -43,6 +43,7 @@ NPROC=${NPROC:-4}
 N_EPOCHS=${N_EPOCHS:-3}
 BATCH_SIZE=${BATCH_SIZE:-32}
 MAX_LENGTH=${MAX_LENGTH:-4096}
+MAX_AUDIO_SECONDS=${MAX_AUDIO_SECONDS:-30}
 LR=${LR:-2e-5}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-${MODEL_NAME}_sft}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-qwen2-audio-sft}
@@ -96,6 +97,7 @@ ${python_path} -m torch.distributed.run \
     data.train.dataset_split=${DATASET_SPLIT} \
     data.train.batch_size=${BATCH_SIZE} \
     data.train.max_length=${MAX_LENGTH} \
+    data.train.max_audio_seconds=${MAX_AUDIO_SECONDS} \
     data.train.prompt="${PROMPT}" \
     data.test.dataset_subset=${VAL_SUBSET} \
     data.test.dataset_split=${VAL_SPLIT} \

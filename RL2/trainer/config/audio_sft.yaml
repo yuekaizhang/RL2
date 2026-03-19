@@ -9,6 +9,7 @@ data:
     dataset_split: test
     batch_size: 32
     max_length: 4096
+    max_audio_seconds: 30
     audio_column: audio
     text_column: text
     prompt: "Detect the language and recognize the speech: <|zh|>"
@@ -19,6 +20,7 @@ data:
     dataset_split: test
     batch_size: ${data.train.batch_size}
     max_length: ${data.train.max_length}
+    max_audio_seconds: ${data.train.max_audio_seconds}
     audio_column: ${data.train.audio_column}
     text_column: ${data.train.text_column}
     prompt: ${data.train.prompt}

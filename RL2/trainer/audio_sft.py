@@ -9,10 +9,10 @@ from RL2.workers import initialize_actor
 from RL2.utils.communication import initialize_global_process_group
 
 
-# Keys that are included in collate_fn output for AC-1 verification
-# but must be filtered before entering the RL2 training pipeline
-# (they have full seq_len shape, incompatible with the RL2 S-1 convention)
-_AC1_VERIFICATION_KEYS = {"input_ids", "attention_mask", "labels", "loss_mask"}
+# Diagnostic keys included in collate_fn output for inspection but not
+# consumed by the training pipeline. They have full sequence length (S),
+# which is incompatible with the RL2 shifted convention (S-1).
+_DIAGNOSTIC_KEYS = {"input_ids", "attention_mask", "labels", "loss_mask"}
 
 
 class AudioSFTTrainer(Trainer):
@@ -35,10 +35,10 @@ class AudioSFTTrainer(Trainer):
 
     @staticmethod
     def _filter_for_training(tensor_dict):
-        """Remove AC-1 verification keys before passing to the training pipeline."""
+        """Remove diagnostic keys before passing to the training pipeline."""
         return {
             k: v for k, v in tensor_dict.items()
-            if k not in _AC1_VERIFICATION_KEYS
+            if k not in _DIAGNOSTIC_KEYS
         }
 
     def train(self):
