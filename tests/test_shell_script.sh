@@ -194,6 +194,68 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""
+echo "=== Behavioral Execution Tests ==="
+
+# Create temp dir for script modification tests
+TMPDIR_TEST=$(mktemp -d)
+
+# Test: Missing python_path actually produces error when executed
+sed 's|MEGATRON_BRIDGE_ROOT=.*|MEGATRON_BRIDGE_ROOT="/tmp/nonexistent_bridge_xyz_test"|' \
+    "${SCRIPT_UNDER_TEST}" > "${TMPDIR_TEST}/test_missing_python.sh"
+chmod +x "${TMPDIR_TEST}/test_missing_python.sh"
+
+mp_output=$(bash "${TMPDIR_TEST}/test_missing_python.sh" 2>&1 || true)
+if echo "${mp_output}" | grep -q "Python not found"; then
+    pass_test "Behavioral: missing python_path produces 'Python not found' error"
+else
+    fail_test "Behavioral: missing python_path produces error" "Expected 'Python not found'"
+fi
+
+mp_exit=0
+bash "${TMPDIR_TEST}/test_missing_python.sh" >/dev/null 2>&1 || mp_exit=$?
+if [[ ${mp_exit} -ne 0 ]]; then
+    pass_test "Behavioral: missing python_path exits non-zero (code=${mp_exit})"
+else
+    fail_test "Behavioral: missing python_path exits non-zero" "Exit code was 0"
+fi
+
+# Test: Conversion failure surfaces error via stub python
+stub_dir="${TMPDIR_TEST}/fake_bridge"
+mkdir -p "${stub_dir}/.venv/bin"
+mkdir -p "${stub_dir}/examples/conversion"
+
+cat > "${stub_dir}/.venv/bin/python" << 'STUBEOF'
+#!/bin/bash
+echo "STUB: Conversion failed - invalid model" >&2
+exit 1
+STUBEOF
+chmod +x "${stub_dir}/.venv/bin/python"
+touch "${stub_dir}/examples/conversion/convert_checkpoints.py"
+
+sed "s|MEGATRON_BRIDGE_ROOT=.*|MEGATRON_BRIDGE_ROOT=\"${stub_dir}\"|" \
+    "${SCRIPT_UNDER_TEST}" > "${TMPDIR_TEST}/test_conv_fail.sh"
+chmod +x "${TMPDIR_TEST}/test_conv_fail.sh"
+
+conv_output=$(bash "${TMPDIR_TEST}/test_conv_fail.sh" 2>&1 || true)
+if echo "${conv_output}" | grep -q "Conversion failed"; then
+    pass_test "Behavioral: conversion failure error message surfaces"
+else
+    fail_test "Behavioral: conversion failure surfaces" "Expected 'Conversion failed' in output"
+fi
+
+conv_exit=0
+bash "${TMPDIR_TEST}/test_conv_fail.sh" >/dev/null 2>&1 || conv_exit=$?
+if [[ ${conv_exit} -ne 0 ]]; then
+    pass_test "Behavioral: conversion failure exits non-zero (code=${conv_exit})"
+else
+    fail_test "Behavioral: conversion failure exits non-zero" "Exit code was 0"
+fi
+
+# Cleanup
+rm -rf "${TMPDIR_TEST}"
+
+# ═══════════════════════════════════════════════════════════════════
+echo ""
 echo "============================================================"
 echo "Results: ${passed} passed, ${failed} failed, $((passed + failed)) total"
 echo "============================================================"
