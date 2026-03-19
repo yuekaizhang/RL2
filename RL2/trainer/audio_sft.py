@@ -9,6 +9,12 @@ from RL2.workers import initialize_actor
 from RL2.utils.communication import initialize_global_process_group
 
 
+# Keys that are included in collate_fn output for AC-1 verification
+# but must be filtered before entering the RL2 training pipeline
+# (they have full seq_len shape, incompatible with the RL2 S-1 convention)
+_AC1_VERIFICATION_KEYS = {"input_ids", "attention_mask", "labels", "loss_mask"}
+
+
 class AudioSFTTrainer(Trainer):
 
     def __init__(self, config: DictConfig):
@@ -27,6 +33,14 @@ class AudioSFTTrainer(Trainer):
             self.config.trainer.n_epochs * len(self.train_dataloader)
         )
 
+    @staticmethod
+    def _filter_for_training(tensor_dict):
+        """Remove AC-1 verification keys before passing to the training pipeline."""
+        return {
+            k: v for k, v in tensor_dict.items()
+            if k not in _AC1_VERIFICATION_KEYS
+        }
+
     def train(self):
 
         step = self.load_ckpt((self.actor,))
@@ -42,11 +56,15 @@ class AudioSFTTrainer(Trainer):
             ):
 
                 step += 1
-                self.actor.sft_step(tensor_dict, True, step)
+                self.actor.sft_step(
+                    self._filter_for_training(tensor_dict), True, step
+                )
                 self.save_ckpt((self.actor,), step)
 
             for tensor_dict in self.test_dataloader:
-                self.actor.sft_step(tensor_dict, False, step)
+                self.actor.sft_step(
+                    self._filter_for_training(tensor_dict), False, step
+                )
 
         self.save_model((self.actor,))
 

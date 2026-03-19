@@ -2,6 +2,7 @@ import logging
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from datasets import load_dataset
 from omegaconf import DictConfig
@@ -35,6 +36,47 @@ def build_conversation(
     ]
 
 
+def _validate_audio(audio_raw, idx: int) -> np.ndarray:
+    """Validate and extract audio array from various HF audio formats.
+
+    Raises ValueError with a descriptive message for missing or corrupted audio.
+    """
+    if audio_raw is None:
+        raise ValueError(
+            f"Example {idx}: audio payload is None. "
+            "The audio file may be missing or failed to load."
+        )
+
+    if isinstance(audio_raw, dict):
+        arr = audio_raw.get("array")
+        if arr is None:
+            raise ValueError(
+                f"Example {idx}: audio dict has no 'array' key. "
+                f"Available keys: {list(audio_raw.keys())}"
+            )
+    elif isinstance(audio_raw, (tuple, list)):
+        arr = audio_raw[0]
+    else:
+        arr = audio_raw
+
+    if isinstance(arr, np.ndarray):
+        if arr.size == 0:
+            raise ValueError(
+                f"Example {idx}: audio array is empty (size=0)."
+            )
+    elif isinstance(arr, (list, tuple)):
+        if len(arr) == 0:
+            raise ValueError(
+                f"Example {idx}: audio array is empty (length=0)."
+            )
+    elif arr is None:
+        raise ValueError(
+            f"Example {idx}: extracted audio array is None."
+        )
+
+    return arr
+
+
 class AudioSFTDataset(Dataset):
 
     def __init__(
@@ -47,6 +89,22 @@ class AudioSFTDataset(Dataset):
         self.processor = processor
         self.tokenizer = processor.tokenizer
         self.dataset = dataset
+
+        # Validate required columns exist
+        audio_column = getattr(config, "audio_column", "audio")
+        text_column = getattr(config, "text_column", "text")
+        if hasattr(dataset, "column_names"):
+            columns = dataset.column_names
+            if audio_column not in columns:
+                raise ValueError(
+                    f"Dataset is missing required audio column '{audio_column}'. "
+                    f"Available columns: {columns}"
+                )
+            if text_column not in columns:
+                raise ValueError(
+                    f"Dataset is missing required text column '{text_column}'. "
+                    f"Available columns: {columns}"
+                )
 
     def __len__(self):
         return len(self.dataset)
@@ -65,21 +123,29 @@ class AudioSFTDataset(Dataset):
         audio_column = getattr(self.config, "audio_column", "audio")
         text_column = getattr(self.config, "text_column", "text")
         remove_text_spaces = getattr(self.config, "remove_text_spaces", True)
+        max_length = getattr(self.config, "max_length", 4096)
 
-        for ex in examples:
+        valid_examples = []
+        for idx, ex in enumerate(examples):
             answer = ex[text_column]
             conv = build_conversation(prompt, answer, remove_text_spaces)
-            conversations.append(conv)
             clean_answer = answer.replace(" ", "") if remove_text_spaces else answer
-            assistant_texts.append(clean_answer)
 
-            audio = ex[audio_column]
-            if isinstance(audio, dict):
-                audios.append(audio["array"])
-            elif isinstance(audio, tuple):
-                audios.append(audio[0])
-            else:
-                audios.append(audio)
+            try:
+                audio_arr = _validate_audio(ex[audio_column], idx)
+            except ValueError as e:
+                warnings.warn(str(e) + " Skipping this example.")
+                continue
+
+            conversations.append(conv)
+            assistant_texts.append(clean_answer)
+            audios.append(audio_arr)
+            valid_examples.append(ex)
+
+        if not conversations:
+            raise RuntimeError(
+                "All examples in this batch had invalid audio. Cannot proceed."
+            )
 
         texts = [
             self.processor.apply_chat_template(conv, tokenize=False)
@@ -91,13 +157,15 @@ class AudioSFTDataset(Dataset):
             audio=audios,
             return_tensors="pt",
             padding=True,
+            truncation=True,
+            max_length=max_length,
         )
 
         input_ids = batch["input_ids"]
         batch_size, seq_len = input_ids.shape
 
-        # Build labels: mask non-assistant tokens with IGNORE_INDEX
-        labels = input_ids.clone()
+        # Build labels: mask all non-assistant tokens with IGNORE_INDEX
+        labels = torch.full_like(input_ids, IGNORE_INDEX)
         for i, assistant_text in enumerate(assistant_texts):
             ids = input_ids[i].tolist()
             assistant_token_ids = self.tokenizer(
@@ -106,21 +174,19 @@ class AudioSFTDataset(Dataset):
 
             span_len = len(assistant_token_ids)
             found = -1
+            # Search backward to find the last occurrence of the assistant span
             for start in range(len(ids) - span_len, -1, -1):
                 if ids[start: start + span_len] == assistant_token_ids:
                     found = start
                     break
 
             if found >= 0:
-                labels[i, :found] = IGNORE_INDEX
-                pad_token_id = self.tokenizer.pad_token_id
-                if pad_token_id is not None:
-                    labels[i][input_ids[i] == pad_token_id] = IGNORE_INDEX
+                # Only unmask the assistant content tokens
+                labels[i, found: found + span_len] = input_ids[i, found: found + span_len]
             else:
                 warnings.warn(
                     f"Could not find assistant span for example {i}, masking all"
                 )
-                labels[i, :] = IGNORE_INDEX
 
         # Shift labels for next-token prediction (Megatron convention)
         shifted_labels = labels[:, 1:]
@@ -129,18 +195,17 @@ class AudioSFTDataset(Dataset):
             dim=1,
         )
 
-        # Derive loss_mask and action_mask from shifted labels
+        # Derive loss_mask from shifted labels
         loss_mask = (shifted_labels != IGNORE_INDEX).float()
 
         # Build RL2-compatible tensor_dict
-        # states = input_ids[:, :-1], actions = input_ids[:, 1:]
         states = input_ids[:, :-1]
         actions = input_ids[:, 1:]
         action_mask = loss_mask[:, :-1]
 
         # Compute actual sequence lengths from attention_mask and set eos_mask
         attention_mask = batch.get("attention_mask", torch.ones_like(input_ids))
-        seq_lengths = attention_mask.sum(dim=1)  # actual lengths (before shift)
+        seq_lengths = attention_mask.sum(dim=1)
         eos_mask = torch.zeros_like(states)
         for i in range(batch_size):
             eos_pos = min(seq_lengths[i].item() - 2, states.shape[1] - 1)
@@ -148,10 +213,16 @@ class AudioSFTDataset(Dataset):
             eos_mask[i, eos_pos] = 1
 
         tensor_dict = {
+            # RL2 training tensors
             "states": states,
             "actions": actions,
             "action_mask": action_mask,
             "eos_mask": eos_mask,
+            # AC-1 required tensors for verification/debugging
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": shifted_labels,
+            "loss_mask": loss_mask,
         }
 
         # Add audio-specific tensors
@@ -169,10 +240,6 @@ def get_audio_dataloaders(
     batch_size: int = None,
 ) -> Tuple:
     from RL2.datasets.base import StatefulCycleDataLoader
-    import numpy as np
-
-    audio_column = getattr(config.train, "audio_column", "audio")
-    text_column = getattr(config.train, "text_column", "text")
 
     def _load_dataset(
         dataset_name: str,

@@ -26,6 +26,7 @@ data:
   test_ratio: 0.03
 
 actor:
+  model_name: ???
   avg_level: token
   freeze_audio_encoder: false
   freeze_language_model: false

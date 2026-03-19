@@ -53,18 +53,19 @@ class MegatronWorker(Worker):
         tf_config = OmegaConf.to_container(config.tf_config)
         for k, v in tf_config.items():
             setattr(self.provider, k, v)
-        # Pass optional freeze flags to the provider (for multimodal models)
-        for freeze_key in ("freeze_audio_encoder", "freeze_language_model",
-                           "freeze_multi_modal_projector"):
-            if hasattr(config, freeze_key):
-                # Map config keys to provider attribute names
-                provider_key = freeze_key
-                if freeze_key == "freeze_audio_encoder":
-                    provider_key = "freeze_audio_model"
-                elif freeze_key == "freeze_multi_modal_projector":
-                    provider_key = "freeze_audio_projection"
-                if hasattr(self.provider, provider_key):
-                    setattr(self.provider, provider_key, getattr(config, freeze_key))
+        # Pass optional freeze flags to the provider (for multimodal models).
+        # Mapping: config key -> Qwen2AudioModelProvider attribute
+        #   freeze_audio_encoder       -> freeze_audio_model
+        #   freeze_language_model       -> freeze_language_model  (same name)
+        #   freeze_multi_modal_projector -> freeze_audio_projection
+        _FREEZE_KEY_MAP = {
+            "freeze_audio_encoder": "freeze_audio_model",
+            "freeze_language_model": "freeze_language_model",
+            "freeze_multi_modal_projector": "freeze_audio_projection",
+        }
+        for config_key, provider_key in _FREEZE_KEY_MAP.items():
+            if hasattr(config, config_key) and hasattr(self.provider, provider_key):
+                setattr(self.provider, provider_key, getattr(config, config_key))
         self.provider.sequence_parallel = self.provider.tensor_model_parallel_size > 1
         self.provider.finalize()
         if not mpu.is_initialized():
