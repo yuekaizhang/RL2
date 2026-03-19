@@ -222,19 +222,22 @@ def _():
 @test("Malformed input_features shape causes runtime error")
 def _():
     input_ids = _make_audio_input_ids(batch_size=1)
-    # Wrong mel dimension (64 instead of 128)
+    # Wrong mel dimension (64 instead of expected 128) - Conv1d expects 128 channels
     bad_feats = torch.randn(1, 64, MEL_LEN, dtype=torch.bfloat16).cuda()
     feat_mask = torch.ones(1, MEL_LEN, dtype=torch.long).cuda()
+    raised = False
     try:
         with torch.no_grad():
             model(
                 input_ids=input_ids, attention_mask=None,
                 position_ids=None, labels=None,
                 input_features=bad_feats, feature_attention_mask=feat_mask)
-        # If no error, the model accepts varying dims - document this
-        print("    Note: model accepted 64-dim features without error")
-    except (RuntimeError, ValueError) as e:
-        pass  # Expected - wrong shape caught
+    except (RuntimeError, ValueError):
+        raised = True
+    assert raised, (
+        "Model unexpectedly accepted input_features with wrong mel dimension "
+        "(64 instead of 128). Malformed shapes must cause an error."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
