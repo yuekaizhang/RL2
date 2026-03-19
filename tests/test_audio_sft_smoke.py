@@ -345,16 +345,26 @@ def _():
 print("\n=== Forward Pass Wiring Tests ===")
 
 
-@test("MegatronWorker._forward_step passes audio kwargs when present (file content)")
+@test("MegatronWorker._build_forward_kwargs passes audio kwargs when present")
 def _():
-    # Read source from disk to avoid importing heavy Megatron/FlashInfer stack
-    source_path = os.path.join(RL2_ROOT, "RL2/workers/megatron/base.py")
-    with open(source_path) as f:
-        source = f.read()
-    assert 'if "input_features" in minibatch:' in source
-    assert 'forward_kwargs["input_features"]' in source
-    assert 'if "feature_attention_mask" in minibatch:' in source
-    assert 'forward_kwargs["feature_attention_mask"]' in source
+    # Ensure FlashInfer cache exists so Megatron imports succeed
+    os.makedirs("/root/.cache/flashinfer/0.5.3/", exist_ok=True)
+    from RL2.workers.megatron.base import MegatronWorker
+    import torch as _torch
+    minibatch = {
+        "states": _torch.zeros(1, 5),
+        "input_features": _torch.zeros(1, 128, 3000),
+        "feature_attention_mask": _torch.zeros(1, 3000),
+    }
+    kwargs = MegatronWorker._build_forward_kwargs(minibatch, None)
+    assert "input_features" in kwargs
+    assert "feature_attention_mask" in kwargs
+    assert kwargs["input_ids"] is minibatch["states"]
+    # Text-only should exclude audio keys
+    text_only = {"states": _torch.zeros(1, 5)}
+    kwargs2 = MegatronWorker._build_forward_kwargs(text_only, None)
+    assert "input_features" not in kwargs2
+    assert "feature_attention_mask" not in kwargs2
 
 
 @test("Freeze flag mapping is correct in MegatronWorker (file content)")

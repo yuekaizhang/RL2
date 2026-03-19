@@ -211,6 +211,27 @@ class MegatronWorker(Worker):
     def _scale_loss(self, loss: torch.Tensor) -> torch.Tensor:
         return mpu.get_data_parallel_world_size(with_context_parallel=True) * loss
 
+    @staticmethod
+    def _build_forward_kwargs(minibatch, packed_seq_params):
+        """Build the keyword arguments for the model forward pass.
+
+        Includes audio-specific tensors (input_features, feature_attention_mask)
+        when present in the minibatch, supporting multimodal models while
+        remaining backward-compatible with text-only batches.
+        """
+        forward_kwargs = dict(
+            input_ids=minibatch["states"],
+            attention_mask=None,
+            position_ids=None,
+            labels=None,
+            packed_seq_params=packed_seq_params,
+        )
+        if "input_features" in minibatch:
+            forward_kwargs["input_features"] = minibatch["input_features"]
+        if "feature_attention_mask" in minibatch:
+            forward_kwargs["feature_attention_mask"] = minibatch["feature_attention_mask"]
+        return forward_kwargs
+
     def _forward_backward(
         self,
         f: Callable,
@@ -236,18 +257,9 @@ class MegatronWorker(Worker):
                 max_seqlen_kv=max_seqlen,
                 qkv_format="thd"
             )
-            forward_kwargs = dict(
-                input_ids=minibatch["states"],
-                attention_mask=None,
-                position_ids=None,
-                labels=None,
-                packed_seq_params=packed_seq_params,
+            forward_kwargs = MegatronWorker._build_forward_kwargs(
+                minibatch, packed_seq_params
             )
-            # Pass audio-specific tensors if present (for multimodal models)
-            if "input_features" in minibatch:
-                forward_kwargs["input_features"] = minibatch["input_features"]
-            if "feature_attention_mask" in minibatch:
-                forward_kwargs["feature_attention_mask"] = minibatch["feature_attention_mask"]
             output_tensor = model(**forward_kwargs)
 
             return output_tensor, partial(f, minibatch, cu_seqlens)
