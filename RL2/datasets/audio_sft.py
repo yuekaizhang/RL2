@@ -120,6 +120,13 @@ class AudioSFTDataset(Dataset):
         self.tokenizer = processor.tokenizer
         self.dataset = dataset
 
+        # Force right padding so that real tokens start at position 0.
+        # The RL2 collator computes eos_mask assuming right-padded layout
+        # (real tokens first, padding at the end). Qwen2-Audio's tokenizer
+        # defaults to padding_side="left", which places padding at the start
+        # and causes slide_along_cp to truncate actual audio tokens.
+        self.tokenizer.padding_side = "right"
+
         # Validate required columns exist
         audio_column = getattr(config, "audio_column", "audio")
         text_column = getattr(config, "text_column", "text")
@@ -238,13 +245,21 @@ class AudioSFTDataset(Dataset):
             for conv in conversations
         ]
 
+        # Route truncation/max_length only to the tokenizer via text_kwargs.
+        # Passing them as flat kwargs would leak to WhisperFeatureExtractor
+        # (both TextKwargs and AudioKwargs declare max_length/truncation),
+        # causing mel features to be padded to 4096 samples (~25 frames)
+        # instead of the default 480000 (3000 frames) expected by the
+        # Whisper-based Qwen2AudioEncoder.
         batch = self.processor(
             text=texts,
             audio=audios,
             return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_length,
+            text_kwargs={
+                "padding": True,
+                "truncation": True,
+                "max_length": max_length,
+            },
         )
 
         input_ids = batch["input_ids"]

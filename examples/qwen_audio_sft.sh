@@ -21,6 +21,11 @@ set -euo pipefail
 # --- Paths ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RL2_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# --- Logging: tee all output (stdout+stderr) to log file ---
+LOG_FILE=${LOG_FILE:-${RL2_ROOT}/log.txt}
+exec > >(tee "${LOG_FILE}") 2>&1
+echo "Logging to ${LOG_FILE}"
 MEGATRON_BRIDGE_ROOT="/workspace_yuekai/asr/Megatron-Bridge"
 
 export PYTHONPATH=${RL2_ROOT}:${MEGATRON_BRIDGE_ROOT}:${PYTHONPATH:-}
@@ -46,7 +51,7 @@ MAX_LENGTH=${MAX_LENGTH:-4096}
 MAX_AUDIO_SECONDS=${MAX_AUDIO_SECONDS:-30}
 LR=${LR:-2e-5}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-${MODEL_NAME}_sft}
-WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-qwen2-audio-sft}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-rl2-qwen2-audio-sft}
 
 # --- Dataset Configuration ---
 DATASET_NAME=${DATASET_NAME:-yuekai/aishell}
@@ -98,7 +103,7 @@ ${python_path} -m torch.distributed.run \
     data.train.batch_size=${BATCH_SIZE} \
     data.train.max_length=${MAX_LENGTH} \
     data.train.max_audio_seconds=${MAX_AUDIO_SECONDS} \
-    data.train.prompt="${PROMPT}" \
+    "data.train.prompt='${PROMPT}'" \
     data.test.dataset_subset=${VAL_SUBSET} \
     data.test.dataset_split=${VAL_SPLIT} \
     actor.model_name=${HF_MODEL} \
@@ -116,24 +121,24 @@ echo "Training complete."
 # ==============================================================================
 # Step 3: Export Megatron checkpoint to HuggingFace format
 # ==============================================================================
-SAVE_DIR="ckpts/${EXPERIMENT_NAME}"
-HF_EXPORT_DIR="${SAVE_DIR}/hf_export"
+# SAVE_DIR="ckpts/${EXPERIMENT_NAME}"
+# HF_EXPORT_DIR="${SAVE_DIR}/hf_export"
 
-if [ -d "${SAVE_DIR}/actor" ]; then
-    echo "============================================================"
-    echo "  Exporting Megatron checkpoint to HuggingFace format..."
-    echo "  Source: ${SAVE_DIR}/actor"
-    echo "  Destination: ${HF_EXPORT_DIR}"
-    echo "============================================================"
-    ${python_path} ${MEGATRON_BRIDGE_ROOT}/examples/models/audio_lm/qwen2_audio/export_hf.py \
-        --megatron-path ${SAVE_DIR}/actor \
-        --hf-path ${HF_EXPORT_DIR} \
-        --hf-model-path ${HF_MODEL}
-    echo "Export complete. HF model saved to: ${HF_EXPORT_DIR}"
-else
-    echo "Warning: No saved model found at ${SAVE_DIR}/actor, skipping HF export."
-    echo "This may happen if save_freq was not set during training."
-fi
+# if [ -d "${SAVE_DIR}/actor" ]; then
+#     echo "============================================================"
+#     echo "  Exporting Megatron checkpoint to HuggingFace format..."
+#     echo "  Source: ${SAVE_DIR}/actor"
+#     echo "  Destination: ${HF_EXPORT_DIR}"
+#     echo "============================================================"
+#     ${python_path} ${MEGATRON_BRIDGE_ROOT}/examples/models/audio_lm/qwen2_audio/export_hf.py \
+#         --megatron-path ${SAVE_DIR}/actor \
+#         --hf-path ${HF_EXPORT_DIR} \
+#         --hf-model-path ${HF_MODEL}
+#     echo "Export complete. HF model saved to: ${HF_EXPORT_DIR}"
+# else
+#     echo "Warning: No saved model found at ${SAVE_DIR}/actor, skipping HF export."
+#     echo "This may happen if save_freq was not set during training."
+# fi
 
 echo "============================================================"
 echo "  Pipeline complete!"
